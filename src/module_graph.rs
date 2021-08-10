@@ -27,10 +27,11 @@ impl ModuleGraph {
 
 impl Debug for ModuleGraph {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let mut modules: Vec<String> = vec![];
-        self.modules.iter().for_each(|(module_filename, _module)| {
-            modules.push(String::from(module_filename));
+        let mut modules: String = String::new();
+        self.modules.iter().for_each(|(module_filename, module)| {
+            modules.push_str(&format!("{}\n", module_filename));
+            modules.push_str(&format!("{}\n", module.render().unwrap()));
         });
-        write!(f, "ModuleGraph ( modules: {} )", modules.join(", "))
+        write!(f, "{}", modules)
     }
 }

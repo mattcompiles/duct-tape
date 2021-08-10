@@ -1,4 +1,5 @@
 use node_resolve::resolve_from;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,10 +16,14 @@ use swc_common::DUMMY_SP;
 use swc_ecmascript::ast;
 use swc_ecmascript::visit::{Fold, FoldWith, Node, Visit, VisitWith};
 
+#[derive(Clone)]
 pub struct JsModule {
     pub filename: String,
-    pub code: String,
-    pub dependencies: Vec<PathBuf>,
+    pub ast: Module,
+    pub source_map: Lrc<SourceMap>,
+    pub dependencies: HashSet<PathBuf>,
+    pub imports: Vec<ImportMeta>,
+    pub comments: SingleThreadedComments,
 }
 
 impl JsModule {
@@ -42,58 +47,93 @@ impl JsModule {
 
         let imports = collect_imports(&module);
 
-        let dependencies = imports
-            .iter()
-            .map(|import| {
-                resolve_from(&import.path, PathBuf::from(&path.parent().unwrap())).expect(&format!(
-                    "Failed to resolve {} from {:?}",
-                    &import.path, &path
-                ))
-            })
-            .collect();
+        let mut dependencies = HashSet::new();
 
-        let runtime_module = to_runtime_imports(module, imports);
-
-        let code_buffer =
-            emit(source_map, comments, &runtime_module).expect("Error emitting JsModule");
-
-        println!("{}", String::from_utf8(code_buffer.clone()).unwrap());
+        for import in &imports {
+            dependencies.insert(
+                resolve_from(&import.path, PathBuf::from(&path.parent().unwrap())).expect(
+                    &format!("Failed to resolve {} from {:?}", &import.path, &path),
+                ),
+            );
+        }
 
         Ok(JsModule {
             filename: root_relative_path,
-            code: String::from_utf8(code_buffer).expect("Error converting code bufer to str"),
             dependencies,
+            ast: module,
+            imports,
+            source_map,
+            comments,
         })
+    }
+
+    pub fn render(&self) -> Result<String, String> {
+        // TODO: Don't use clone here
+        let final_ast = self.ast.clone().fold_with(&mut RuntimeImportMapper {
+            imports: self.imports.clone(),
+        });
+
+        let buf = match self.emit(&final_ast) {
+            Err(_) => return Err(format!("Failed to emit buffer: {}", self.filename)),
+            Ok(value) => value,
+        };
+
+        match String::from_utf8(buf) {
+            Err(_) => Err(format!(
+                "Failed to convert UTF-8 buffer to string buffer: {}",
+                self.filename
+            )),
+            Ok(value) => Ok(value),
+        }
+    }
+
+    fn emit(&self, ast: &Module) -> Result<Vec<u8>, std::io::Error> {
+        let mut buf = vec![];
+        {
+            let writer = Box::new(JsWriter::new(self.source_map.clone(), "\n", &mut buf, None));
+            let config = swc_ecmascript::codegen::Config { minify: false };
+            let mut emitter = swc_ecmascript::codegen::Emitter {
+                cfg: config,
+                comments: Some(&self.comments),
+                cm: self.source_map.clone(),
+                wr: writer,
+            };
+            emitter.emit_module(ast)?;
+        }
+        return Ok(buf);
     }
 }
 
 fn collect_imports(module: &ast::Module) -> Vec<ImportMeta> {
-    let mut c = ImportCollector { imports: vec![] };
+    let mut c = ImportExportCollector { imports: vec![] };
     module.visit_with(&ast::Invalid { span: DUMMY_SP } as _, &mut c);
     return c.imports;
 }
 
+#[derive(Clone)]
 struct NamedImport {
     local: JsWord,
     import_name: JsWord,
 }
 
+#[derive(Clone)]
 enum ImportType {
     Namespace(JsWord),
     Named(Vec<NamedImport>),
     SideEffect(),
 }
 
-struct ImportMeta {
+#[derive(Clone)]
+pub struct ImportMeta {
     import_type: ImportType,
     path: JsWord,
 }
 
-struct ImportCollector {
+struct ImportExportCollector {
     imports: Vec<ImportMeta>,
 }
 
-impl Visit for ImportCollector {
+impl Visit for ImportExportCollector {
     fn visit_import_decl(&mut self, node: &ImportDecl, _parent: &dyn Node) {
         let mut namespace = None;
         let mut named: Vec<NamedImport> = vec![];
@@ -132,10 +172,6 @@ impl Visit for ImportCollector {
     }
 }
 
-fn to_runtime_imports<'a>(module: ast::Module, imports: Vec<ImportMeta>) -> ast::Module {
-    module.fold_with(&mut RuntimeImportMapper { imports })
-}
-
 struct RuntimeImportMapper {
     imports: Vec<ImportMeta>,
 }
@@ -163,27 +199,6 @@ impl Fold for RuntimeImportMapper {
 
         node
     }
-}
-
-fn emit(
-    source_map: Lrc<SourceMap>,
-    comments: SingleThreadedComments,
-    program: &Module,
-) -> Result<Vec<u8>, std::io::Error> {
-    let mut buf = vec![];
-    {
-        let writer = Box::new(JsWriter::new(source_map.clone(), "\n", &mut buf, None));
-        let config = swc_ecmascript::codegen::Config { minify: false };
-        let mut emitter = swc_ecmascript::codegen::Emitter {
-            cfg: config,
-            comments: Some(&comments),
-            cm: source_map.clone(),
-            wr: writer,
-        };
-
-        emitter.emit_module(&program)?;
-    }
-    return Ok(buf);
 }
 
 fn create_runtime_require(import: &ImportMeta) -> ModuleItem {
