@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::js_module::JsModule;
 
 pub struct ModuleGraph {
-    modules: HashMap<PathBuf, JsModule>,
+    pub modules: HashMap<PathBuf, JsModule>,
 }
 
 impl ModuleGraph {

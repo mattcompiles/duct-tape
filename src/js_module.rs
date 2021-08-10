@@ -30,7 +30,7 @@ impl JsModule {
         let root_relative_path = path
             .clone()
             .strip_prefix(env::current_dir().expect("Couldn't access CWD"))
-            .unwrap()
+            .expect("Failed to strip CWD")
             .to_owned();
 
         let source_map = Lrc::new(SourceMap::default());
@@ -46,7 +46,7 @@ impl JsModule {
         let mut dependencies = HashSet::new();
 
         for import in &imports {
-            dependencies.insert(import.get_resolved_path(&path));
+            dependencies.insert(import.get_resolved_path(path));
         }
 
         let final_ast = module.fold_with(&mut RuntimeImportMapper {
@@ -76,7 +76,7 @@ impl JsModule {
         };
 
         Ok(JsModule {
-            filename: root_relative_path,
+            filename: path.to_owned(),
             dependencies,
             code,
             imports,

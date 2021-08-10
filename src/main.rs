@@ -7,6 +7,7 @@ use crate::js_module::JsModule;
 mod js_module;
 mod module_graph;
 mod parser;
+mod template;
 
 fn main() {
     let entry = {
@@ -25,7 +26,10 @@ fn main() {
         }
     };
 
-    graph.load_module(entry_module);
+    graph.load_module(entry_module.clone());
 
-    println!("{:?}", graph);
+    println!(
+        "{}",
+        template::render_chunk(&graph, entry_module.filename.to_str().unwrap())
+    );
 }
