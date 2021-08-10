@@ -18,22 +18,18 @@ use swc_ecmascript::visit::{Fold, FoldWith, Node, Visit, VisitWith};
 
 #[derive(Clone)]
 pub struct JsModule {
-    pub filename: String,
-    pub ast: Module,
-    pub source_map: Lrc<SourceMap>,
+    pub filename: PathBuf,
+    pub code: String,
     pub dependencies: HashSet<PathBuf>,
     pub imports: Vec<ImportMeta>,
-    pub comments: SingleThreadedComments,
 }
 
 impl JsModule {
-    pub fn new(path: &Path) -> Result<JsModule, String> {
+    pub fn new(path: &Path) -> Result<Self, String> {
         println!("Loading JS module: {}", path.to_str().unwrap());
         let root_relative_path = path
             .clone()
             .strip_prefix(env::current_dir().expect("Couldn't access CWD"))
-            .unwrap()
-            .to_str()
             .unwrap()
             .to_owned();
 
@@ -50,58 +46,62 @@ impl JsModule {
         let mut dependencies = HashSet::new();
 
         for import in &imports {
-            dependencies.insert(
-                resolve_from(&import.path, PathBuf::from(&path.parent().unwrap())).expect(
-                    &format!("Failed to resolve {} from {:?}", &import.path, &path),
-                ),
-            );
+            dependencies.insert(import.get_resolved_path(&path));
         }
+
+        let final_ast = module.fold_with(&mut RuntimeImportMapper {
+            // TODO: Don't use clone here
+            imports: imports.clone(),
+            filename: path,
+        });
+
+        let buf = match emit(&final_ast, source_map, comments) {
+            Err(_) => {
+                return Err(format!(
+                    "Failed to emit buffer: {}",
+                    &root_relative_path.to_str().unwrap()
+                ))
+            }
+            Ok(value) => value,
+        };
+
+        let code = match String::from_utf8(buf) {
+            Err(_) => {
+                return Err(format!(
+                    "Failed to convert UTF-8 buffer to string buffer: {}",
+                    &root_relative_path.to_str().unwrap(),
+                ))
+            }
+            Ok(value) => value,
+        };
 
         Ok(JsModule {
             filename: root_relative_path,
             dependencies,
-            ast: module,
+            code,
             imports,
-            source_map,
-            comments,
         })
     }
+}
 
-    pub fn render(&self) -> Result<String, String> {
-        // TODO: Don't use clone here
-        let final_ast = self.ast.clone().fold_with(&mut RuntimeImportMapper {
-            imports: self.imports.clone(),
-        });
-
-        let buf = match self.emit(&final_ast) {
-            Err(_) => return Err(format!("Failed to emit buffer: {}", self.filename)),
-            Ok(value) => value,
+fn emit(
+    ast: &Module,
+    source_map: Lrc<SourceMap>,
+    comments: SingleThreadedComments,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut buf = vec![];
+    {
+        let writer = Box::new(JsWriter::new(source_map.clone(), "\n", &mut buf, None));
+        let config = swc_ecmascript::codegen::Config { minify: false };
+        let mut emitter = swc_ecmascript::codegen::Emitter {
+            cfg: config,
+            comments: Some(&comments),
+            cm: source_map.clone(),
+            wr: writer,
         };
-
-        match String::from_utf8(buf) {
-            Err(_) => Err(format!(
-                "Failed to convert UTF-8 buffer to string buffer: {}",
-                self.filename
-            )),
-            Ok(value) => Ok(value),
-        }
+        emitter.emit_module(ast)?;
     }
-
-    fn emit(&self, ast: &Module) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = vec![];
-        {
-            let writer = Box::new(JsWriter::new(self.source_map.clone(), "\n", &mut buf, None));
-            let config = swc_ecmascript::codegen::Config { minify: false };
-            let mut emitter = swc_ecmascript::codegen::Emitter {
-                cfg: config,
-                comments: Some(&self.comments),
-                cm: self.source_map.clone(),
-                wr: writer,
-            };
-            emitter.emit_module(ast)?;
-        }
-        return Ok(buf);
-    }
+    return Ok(buf);
 }
 
 fn collect_imports(module: &ast::Module) -> Vec<ImportMeta> {
@@ -127,6 +127,15 @@ enum ImportType {
 pub struct ImportMeta {
     import_type: ImportType,
     path: JsWord,
+}
+
+impl ImportMeta {
+    fn get_resolved_path(&self, from: &Path) -> PathBuf {
+        resolve_from(&self.path, PathBuf::from(&from.parent().unwrap())).expect(&format!(
+            "Failed to resolve {} from {:?}",
+            &self.path, &from
+        ))
+    }
 }
 
 struct ImportExportCollector {
@@ -172,11 +181,12 @@ impl Visit for ImportExportCollector {
     }
 }
 
-struct RuntimeImportMapper {
+struct RuntimeImportMapper<'a> {
+    filename: &'a Path,
     imports: Vec<ImportMeta>,
 }
 
-impl Fold for RuntimeImportMapper {
+impl<'a> Fold for RuntimeImportMapper<'a> {
     fn fold_module(&mut self, mut node: Module) -> Module {
         // Remove all import statements
         node.body.retain(|module_item| match module_item {
@@ -187,10 +197,41 @@ impl Fold for RuntimeImportMapper {
             _ => true,
         });
 
+        for i in 0..node.body.len() {
+            match &node.body[i] {
+                ModuleItem::ModuleDecl(decl) => match decl {
+                    ModuleDecl::ExportNamed(_named_export) => {
+                        panic!("ModuleDecl::ExportNamed: Not implemented");
+                    }
+                    ModuleDecl::ExportDecl(named_export) => match &named_export.decl {
+                        Decl::Var(var_decl) => {
+                            node.body[i] = create_runtime_export(
+                                match &var_decl.decls[0].name {
+                                    Pat::Ident(ident) => &ident.id.sym,
+                                    _ => panic!("Not implemented"),
+                                },
+                                var_decl.decls[0]
+                                    .init
+                                    .as_ref()
+                                    .expect("export const with no initialiser"),
+                            );
+                        }
+                        _ => {}
+                    },
+                    ModuleDecl::ExportDefaultExpr(default_export) => {
+                        let export_name: JsWord = "default".into();
+                        node.body[i] = create_runtime_export(&export_name, &default_export.expr);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
         let mut runtime_imports: Vec<ModuleItem> = self
             .imports
             .iter()
-            .map(|import| create_runtime_require(import))
+            .map(|import| self.create_runtime_require(import))
             .collect();
 
         // Insert runtime imports at start of file
@@ -201,78 +242,111 @@ impl Fold for RuntimeImportMapper {
     }
 }
 
-fn create_runtime_require(import: &ImportMeta) -> ModuleItem {
-    let decl_name = match &import.import_type {
-        ImportType::Namespace(local) => Pat::Ident(BindingIdent::from(Ident {
-            sym: local.into(),
+impl<'a> RuntimeImportMapper<'a> {
+    fn create_runtime_require(&self, import: &ImportMeta) -> ModuleItem {
+        let decl_name = match &import.import_type {
+            ImportType::Namespace(local) => Pat::Ident(BindingIdent::from(Ident {
+                sym: local.into(),
+                span: DUMMY_SP,
+                optional: false,
+            })),
+            ImportType::Named(locals) => Pat::Object(ObjectPat {
+                span: DUMMY_SP,
+                optional: false,
+                type_ann: None,
+                props: locals
+                    .iter()
+                    .map(|named_import| {
+                        if named_import.import_name == named_import.local {
+                            ObjectPatProp::Assign(AssignPatProp {
+                                span: DUMMY_SP,
+                                key: Ident {
+                                    sym: named_import.local.clone(),
+                                    span: DUMMY_SP,
+                                    optional: false,
+                                },
+                                value: None,
+                            })
+                        } else {
+                            ObjectPatProp::KeyValue(KeyValuePatProp {
+                                key: PropName::Ident(Ident {
+                                    span: DUMMY_SP,
+                                    optional: false,
+                                    sym: named_import.import_name.clone(),
+                                }),
+                                value: Box::from(Pat::Ident(BindingIdent::from(Ident {
+                                    sym: named_import.local.clone(),
+                                    span: DUMMY_SP,
+                                    optional: false,
+                                }))),
+                            })
+                        }
+                    })
+                    .collect(),
+            }),
+            ImportType::SideEffect() => {
+                panic!("NOT IMPLEMENTED: Side effect imports");
+            }
+        };
+        ModuleItem::Stmt(Stmt::Decl(Decl::Var(VarDecl {
+            kind: VarDeclKind::Var,
+            declare: false,
             span: DUMMY_SP,
-            optional: false,
-        })),
-        ImportType::Named(locals) => Pat::Object(ObjectPat {
-            span: DUMMY_SP,
-            optional: false,
-            type_ann: None,
-            props: locals
-                .iter()
-                .map(|named_import| {
-                    if named_import.import_name == named_import.local {
-                        ObjectPatProp::Assign(AssignPatProp {
+            decls: vec![VarDeclarator {
+                name: decl_name,
+                init: Some(Box::new(Expr::Call(CallExpr {
+                    callee: ExprOrSuper::Expr(Box::from(Expr::Ident(Ident {
+                        sym: "__runtime_require__".into(),
+                        span: DUMMY_SP,
+                        optional: false,
+                    }))),
+                    args: vec![ExprOrSpread {
+                        expr: Box::from(Expr::Lit(Lit::Str(Str {
+                            value: import
+                                .get_resolved_path(&self.filename)
+                                .to_str()
+                                .unwrap()
+                                .into(),
                             span: DUMMY_SP,
-                            key: Ident {
-                                sym: named_import.local.clone(),
-                                span: DUMMY_SP,
-                                optional: false,
-                            },
-                            value: None,
-                        })
-                    } else {
-                        ObjectPatProp::KeyValue(KeyValuePatProp {
-                            key: PropName::Ident(Ident {
-                                span: DUMMY_SP,
-                                optional: false,
-                                sym: named_import.import_name.clone(),
-                            }),
-                            value: Box::from(Pat::Ident(BindingIdent::from(Ident {
-                                sym: named_import.local.clone(),
-                                span: DUMMY_SP,
-                                optional: false,
-                            }))),
-                        })
-                    }
-                })
-                .collect(),
-        }),
-        ImportType::SideEffect() => {
-            panic!("NOT IMPLEMENTED: Side effect imports");
-        }
-    };
-
-    ModuleItem::Stmt(Stmt::Decl(Decl::Var(VarDecl {
-        kind: VarDeclKind::Var,
-        declare: false,
-        span: DUMMY_SP,
-        decls: vec![VarDeclarator {
-            name: decl_name,
-            init: Some(Box::new(Expr::Call(CallExpr {
-                callee: ExprOrSuper::Expr(Box::from(Expr::Ident(Ident {
-                    sym: "__runtime_require__".into(),
+                            has_escape: true,
+                            kind: StrKind::Synthesized,
+                        }))),
+                        spread: None,
+                    }],
                     span: DUMMY_SP,
+                    type_args: None,
+                }))),
+                span: DUMMY_SP,
+                definite: false,
+            }],
+        })))
+    }
+}
+
+fn create_runtime_export(name: &JsWord, value: &Box<Expr>) -> ModuleItem {
+    ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+        span: DUMMY_SP,
+        expr: Box::new(Expr::Assign(AssignExpr {
+            span: DUMMY_SP,
+
+            op: AssignOp::Assign,
+
+            left: PatOrExpr::Expr(Box::new(Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
+                    span: DUMMY_SP,
+                    sym: "exports".into(),
                     optional: false,
                 }))),
-                args: vec![ExprOrSpread {
-                    expr: Box::from(Expr::Lit(Lit::Str(Str {
-                        value: import.path.clone().into(),
-                        span: DUMMY_SP,
-                        has_escape: true,
-                        kind: StrKind::Synthesized,
-                    }))),
-                    spread: None,
-                }],
-                span: DUMMY_SP,
-                type_args: None,
+                prop: Box::new(Expr::Ident(Ident {
+                    span: DUMMY_SP,
+                    sym: name.into(),
+                    optional: false,
+                })),
+                computed: false,
             }))),
-            span: DUMMY_SP,
-            definite: false,
-        }],
-    })))
+
+            right: value.clone(),
+        })),
+    }))
 }

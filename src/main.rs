@@ -2,6 +2,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
+use crate::js_module::JsModule;
+
 mod js_module;
 mod module_graph;
 mod parser;
@@ -15,7 +17,7 @@ fn main() {
 
     let mut graph = module_graph::ModuleGraph::new();
 
-    let entry_module = match js_module::JsModule::new(&entry) {
+    let entry_module = match JsModule::new(&entry) {
         Ok(module) => module,
         Err(err) => {
             println!("{}", err);

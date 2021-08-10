@@ -173,7 +173,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "duct_tape"
+name = "duct-tape"
 version = "0.1.0"
 dependencies = [
  "node-resolve",
