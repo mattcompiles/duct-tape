@@ -25,10 +25,6 @@ impl ModuleGraph {
         self.modules.insert(module.id.to_string(), module);
     }
 
-    pub fn get_module(&self, id: &str) -> Option<&JsModule> {
-        self.modules.get(id)
-    }
-
     pub fn has_module(&self, id: &str) -> bool {
         self.modules.contains_key(id)
     }
