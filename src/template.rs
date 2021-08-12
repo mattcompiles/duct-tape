@@ -1,14 +1,33 @@
 use crate::module_graph::ModuleGraph;
 
-pub fn render_chunk(graph: &ModuleGraph, entrypoint: &str) -> String {
-    format!(
-        "
+pub fn render_chunk(graph: &ModuleGraph, entry_id: &String) -> String {
+  let mut modules_in_chunk = graph.get_module_deps(&entry_id);
+  modules_in_chunk.insert(entry_id);
+
+  let mut module_map = String::from("{\n");
+
+  for module_id in modules_in_chunk {
+    let module = graph.modules.get(module_id).expect("Missing module id");
+
+    module_map.push_str(&format!(
+      "\"{}\": function(exports, __runtime_require__) {{",
+      module.id
+    ));
+
+    module_map.push_str(&module.code);
+
+    module_map.push_str("},")
+  }
+
+  module_map.push_str("}");
+
+  format!(
+    "
     const modules = {};
     const entry = \"{}\";
     function ductTape({{ modules, entry }}) {{
       const moduleCache = {{}};
       const require = moduleName => {{
-        // if in cache, return the cached version
         if (moduleCache[moduleName]) {{
           return moduleCache[moduleName];
         }}
@@ -26,26 +45,6 @@ pub fn render_chunk(graph: &ModuleGraph, entrypoint: &str) -> String {
 
     ductTape({{ modules, entry }});
     ",
-        render_module_map(graph),
-        entrypoint
-    )
-}
-
-fn render_module_map(graph: &ModuleGraph) -> String {
-    let mut module_map = String::from("{\n");
-
-    for (path, module) in &graph.modules {
-        module_map.push_str(&format!(
-            "\"{}\": function(exports, __runtime_require__) {{",
-            path.to_str().unwrap()
-        ));
-
-        module_map.push_str(&module.code);
-
-        module_map.push_str("},")
-    }
-
-    module_map.push_str("}");
-
-    module_map
+    module_map, entry_id
+  )
 }
