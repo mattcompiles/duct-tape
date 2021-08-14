@@ -7,17 +7,20 @@ pub struct JsModule {
     pub code: String,
 }
 
+#[derive(Clone)]
 pub struct NamedImport {
     pub local: JsWord,
     pub import_name: JsWord,
 }
 
+#[derive(Clone)]
 pub enum ImportType {
     Namespace(JsWord),
     Named(Vec<NamedImport>),
     SideEffect(),
 }
 
+#[derive(Clone)]
 pub struct Dependency {
     pub id: String,
     pub filepath: PathBuf,

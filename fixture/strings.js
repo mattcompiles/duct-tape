@@ -1,3 +1,6 @@
-import hi, { secrets, yell } from './anotherFile';
+import { a } from './a';
+import { b } from './b';
+import { c } from './c';
+import { d } from './d';
 
-export default `${hi}, ${secrets} ${yell}`;
+export default [a, b, c, d].join();

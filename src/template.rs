@@ -1,13 +1,13 @@
-use crate::module_graph::ModuleGraph;
+use crate::compiler::Compilation;
 
-pub fn render_chunk(graph: &ModuleGraph, entry_id: &String) -> String {
-  let mut modules_in_chunk = graph.get_module_deps(&entry_id);
+pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
+  let mut modules_in_chunk = c.graph.get_module_deps(&entry_id);
   modules_in_chunk.insert(entry_id);
 
   let mut module_map = String::from("{\n");
 
   for module_id in modules_in_chunk {
-    let module = graph.modules.get(module_id).expect("Missing module id");
+    let module = c.graph.modules.get(module_id).expect("Missing module id");
 
     module_map.push_str(&format!(
       "\"{}\": function(exports, __runtime_require__) {{",
