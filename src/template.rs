@@ -1,4 +1,5 @@
 use crate::compiler::Compilation;
+use crate::js_module::ModuleType;
 
 pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
   let mut modules_in_chunk = c.graph.get_module_deps(&entry_id);
@@ -13,6 +14,10 @@ pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
       "\"{}\": function(exports, __runtime_require__) {{",
       module.id
     ));
+
+    if let ModuleType::CommonJS = module.module_type {
+      module_map.push_str("var module = {exports};");
+    }
 
     module_map.push_str(&module.code);
 

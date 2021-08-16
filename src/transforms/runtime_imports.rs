@@ -6,7 +6,7 @@ use swc_ecmascript::ast;
 use swc_ecmascript::visit::{Fold, FoldWith};
 
 use crate::js_module::Dependency;
-use crate::js_module::{ImportType, NamedImport};
+use crate::js_module::{ImportType, ModuleType, NamedImport};
 use crate::utils::create_module_id;
 use crate::utils::resolve_dependency;
 
@@ -14,22 +14,29 @@ pub fn runtime_imports(
     module: ast::Module,
     filepath: &Path,
     project_root: &Path,
-) -> (Module, Vec<Dependency>) {
+) -> (Module, Vec<Dependency>, ModuleType) {
     let mut import_mapper = RuntimeImportMapper {
         dependencies: vec![],
         filepath,
         project_root,
+        // Default to CJS until import/export is detected
+        module_type: ModuleType::CommonJS,
     };
 
     let transformed_module = module.fold_with(&mut import_mapper);
 
-    (transformed_module, import_mapper.dependencies)
+    (
+        transformed_module,
+        import_mapper.dependencies,
+        import_mapper.module_type,
+    )
 }
 
 struct RuntimeImportMapper<'a> {
     filepath: &'a Path,
     project_root: &'a Path,
     dependencies: Vec<Dependency>,
+    module_type: ModuleType,
 }
 
 impl<'a> Fold for RuntimeImportMapper<'a> {
@@ -47,31 +54,36 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
 
         for i in 0..node.body.len() {
             match &node.body[i] {
-                ModuleItem::ModuleDecl(decl) => match decl {
-                    ModuleDecl::ExportNamed(_named_export) => {
-                        panic!("ModuleDecl::ExportNamed: Not implemented");
-                    }
-                    ModuleDecl::ExportDecl(named_export) => match &named_export.decl {
-                        Decl::Var(var_decl) => {
-                            node.body[i] = create_runtime_export(
-                                match &var_decl.decls[0].name {
-                                    Pat::Ident(ident) => &ident.id.sym,
-                                    _ => panic!("Not implemented"),
-                                },
-                                var_decl.decls[0]
-                                    .init
-                                    .as_ref()
-                                    .expect("export const with no initialiser"),
-                            );
+                ModuleItem::ModuleDecl(decl) => {
+                    // Detecting a ModuleDecl means the current file is ESM
+                    self.module_type = ModuleType::ESM;
+                    match decl {
+                        ModuleDecl::ExportNamed(_named_export) => {
+                            panic!("ModuleDecl::ExportNamed: Not implemented");
+                        }
+                        ModuleDecl::ExportDecl(named_export) => match &named_export.decl {
+                            Decl::Var(var_decl) => {
+                                node.body[i] = create_runtime_export(
+                                    match &var_decl.decls[0].name {
+                                        Pat::Ident(ident) => &ident.id.sym,
+                                        _ => panic!("Not implemented"),
+                                    },
+                                    var_decl.decls[0]
+                                        .init
+                                        .as_ref()
+                                        .expect("export const with no initialiser"),
+                                );
+                            }
+                            _ => {}
+                        },
+                        ModuleDecl::ExportDefaultExpr(default_export) => {
+                            let export_name: JsWord = "default".into();
+                            node.body[i] =
+                                create_runtime_export(&export_name, &default_export.expr);
                         }
                         _ => {}
-                    },
-                    ModuleDecl::ExportDefaultExpr(default_export) => {
-                        let export_name: JsWord = "default".into();
-                        node.body[i] = create_runtime_export(&export_name, &default_export.expr);
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -79,6 +91,10 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
         let mut runtime_imports: Vec<ModuleItem> = self
             .dependencies
             .iter()
+            .filter(|import| match import.import_type {
+                ImportType::Require => false,
+                _ => true,
+            })
             .map(|import| self.create_runtime_require(import))
             .collect();
 
@@ -117,7 +133,7 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
 
         let import_type = match (namespace, node.specifiers.len()) {
             (Some(local), _) => ImportType::Namespace(local),
-            (None, 0) => ImportType::SideEffect(),
+            (None, 0) => ImportType::SideEffect,
             (None, _) => ImportType::Named(named),
         };
 
@@ -130,6 +146,68 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
         });
 
         node
+    }
+
+    fn fold_call_expr(&mut self, node: CallExpr) -> CallExpr {
+        // CommonJS Support
+        let require_ident: JsWord = "require".into();
+
+        let new_callee = match node.callee.clone() {
+            ExprOrSuper::Expr(callee_expr) => match &*callee_expr {
+                Expr::Ident(ident) => {
+                    if ident.sym == require_ident {
+                        Some(ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
+                            sym: "__runtime_require__".into(),
+                            span: DUMMY_SP,
+                            optional: false,
+                        }))))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if let Some(callee) = new_callee {
+            let dep_filepath = match &*node.args[0].expr {
+                Expr::Lit(lit) => match lit {
+                    Lit::Str(request) => resolve_dependency(&request.value, self.filepath),
+                    _ => {
+                        panic!("Invalid syntax");
+                    }
+                },
+                _ => {
+                    panic!("Complex require statements not implemented");
+                }
+            };
+
+            let dep_id = create_module_id(&dep_filepath, &self.project_root);
+
+            self.dependencies.push(Dependency {
+                import_type: ImportType::Require,
+                id: dep_id.clone(),
+                filepath: dep_filepath,
+            });
+
+            CallExpr {
+                span: DUMMY_SP,
+                callee,
+                args: vec![ExprOrSpread {
+                    expr: Box::from(Expr::Lit(Lit::Str(Str {
+                        value: dep_id.into(),
+                        span: DUMMY_SP,
+                        has_escape: true,
+                        kind: StrKind::Synthesized,
+                    }))),
+                    spread: None,
+                }],
+                ..node
+            }
+        } else {
+            node
+        }
     }
 }
 
@@ -175,8 +253,11 @@ impl<'a> RuntimeImportMapper<'a> {
                     })
                     .collect(),
             }),
-            ImportType::SideEffect() => {
+            ImportType::SideEffect => {
                 panic!("NOT IMPLEMENTED: Side effect imports");
+            }
+            ImportType::Require => {
+                panic!("Shouldn't happen");
             }
         };
         ModuleItem::Stmt(Stmt::Decl(Decl::Var(VarDecl {

@@ -116,7 +116,7 @@ fn build_module(
         Ok(module) => module,
     };
 
-    let (final_ast, dependencies) = runtime_imports(module, &filepath, &project_root);
+    let (final_ast, dependencies, module_type) = runtime_imports(module, &filepath, &project_root);
 
     let buf = match emit(&final_ast, source_map, comments) {
         Err(_) => return Err(format!("Failed to emit buffer: {}", &id)),
@@ -133,7 +133,15 @@ fn build_module(
         Ok(value) => value,
     };
 
-    Ok((JsModule { id, filepath, code }, dependencies))
+    Ok((
+        JsModule {
+            id,
+            filepath,
+            code,
+            module_type,
+        },
+        dependencies,
+    ))
 }
 
 fn emit(

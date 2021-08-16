@@ -1,3 +1,4 @@
 import string from './strings';
+import cjs from './cjs';
 
-console.log(string);
+console.log(string, cjs);
