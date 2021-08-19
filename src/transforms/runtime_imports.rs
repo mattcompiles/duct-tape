@@ -1,5 +1,4 @@
 use ast::*;
-use std::path::Path;
 use swc_atoms::JsWord;
 use swc_common::DUMMY_SP;
 use swc_ecmascript::ast;
@@ -7,18 +6,10 @@ use swc_ecmascript::visit::{Fold, FoldWith};
 
 use crate::js_module::Dependency;
 use crate::js_module::{ImportType, ModuleType, NamedImport};
-use crate::utils::create_module_id;
-use crate::utils::resolve_dependency;
 
-pub fn runtime_imports(
-    module: ast::Module,
-    filepath: &Path,
-    project_root: &Path,
-) -> (Module, Vec<Dependency>, ModuleType) {
+pub fn runtime_imports(module: ast::Module) -> (Module, Vec<Dependency>, ModuleType) {
     let mut import_mapper = RuntimeImportMapper {
         dependencies: vec![],
-        filepath,
-        project_root,
         // Default to CJS until import/export is detected
         module_type: ModuleType::CommonJS,
     };
@@ -32,14 +23,12 @@ pub fn runtime_imports(
     )
 }
 
-struct RuntimeImportMapper<'a> {
-    filepath: &'a Path,
-    project_root: &'a Path,
+struct RuntimeImportMapper {
     dependencies: Vec<Dependency>,
     module_type: ModuleType,
 }
 
-impl<'a> Fold for RuntimeImportMapper<'a> {
+impl Fold for RuntimeImportMapper {
     fn fold_module(&mut self, node: Module) -> Module {
         let mut node = node.fold_children_with(self);
 
@@ -106,15 +95,25 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
     }
 
     fn fold_import_decl(&mut self, node: ImportDecl) -> ImportDecl {
+        if node.specifiers.len() == 0 {
+            // No specifiers means a side effect import
+            self.dependencies.push(Dependency {
+                request: node.src.value.clone(),
+                import_type: ImportType::SideEffect,
+            });
+
+            return node;
+        }
+
         let mut namespace = None;
         let mut named: Vec<NamedImport> = vec![];
+        let mut default = None;
 
         for specifier in &node.specifiers {
             match specifier {
-                ImportSpecifier::Default(default_import) => named.push(NamedImport {
-                    local: default_import.local.sym.clone(),
-                    import_name: "default".into(),
-                }),
+                ImportSpecifier::Default(default_import) => {
+                    default = Some(default_import.local.sym.clone());
+                }
                 ImportSpecifier::Named(named_import) => {
                     let imported = match &named_import.imported {
                         Some(i) => i.sym.clone(),
@@ -131,49 +130,52 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
             }
         }
 
-        let import_type = match (namespace, node.specifiers.len()) {
-            (Some(local), _) => ImportType::Namespace(local),
-            (None, 0) => ImportType::SideEffect,
-            (None, _) => ImportType::Named(named),
-        };
+        if let Some(namespace_local) = namespace {
+            self.dependencies.push(Dependency {
+                request: node.src.value.clone(),
+                import_type: ImportType::Namespace(namespace_local),
+            });
+        }
 
-        let dep_filepath = resolve_dependency(&node.src.value.clone(), self.filepath);
+        if let Some(default_local) = default {
+            self.dependencies.push(Dependency {
+                request: node.src.value.clone(),
+                import_type: ImportType::Default(default_local),
+            });
+        }
 
-        self.dependencies.push(Dependency {
-            import_type,
-            id: create_module_id(&dep_filepath, &self.project_root),
-            filepath: dep_filepath,
-        });
+        if named.len() > 0 {
+            self.dependencies.push(Dependency {
+                request: node.src.value.clone(),
+                import_type: ImportType::Named(named),
+            });
+        }
 
         node
     }
 
+    // CommonJS Support
     fn fold_call_expr(&mut self, node: CallExpr) -> CallExpr {
-        // CommonJS Support
         let require_ident: JsWord = "require".into();
 
-        let new_callee = match node.callee.clone() {
+        let is_require_call = match node.callee.clone() {
             ExprOrSuper::Expr(callee_expr) => match &*callee_expr {
                 Expr::Ident(ident) => {
                     if ident.sym == require_ident {
-                        Some(ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
-                            sym: "__runtime_require__".into(),
-                            span: DUMMY_SP,
-                            optional: false,
-                        }))))
+                        true
                     } else {
-                        None
+                        false
                     }
                 }
-                _ => None,
+                _ => false,
             },
-            _ => None,
+            _ => false,
         };
 
-        if let Some(callee) = new_callee {
-            let dep_filepath = match &*node.args[0].expr {
+        if is_require_call {
+            let request = match &*node.args[0].expr {
                 Expr::Lit(lit) => match lit {
-                    Lit::Str(request) => resolve_dependency(&request.value, self.filepath),
+                    Lit::Str(request) => &request.value,
                     _ => {
                         panic!("Invalid syntax");
                     }
@@ -183,36 +185,19 @@ impl<'a> Fold for RuntimeImportMapper<'a> {
                 }
             };
 
-            let dep_id = create_module_id(&dep_filepath, &self.project_root);
-
             self.dependencies.push(Dependency {
+                request: request.clone(),
                 import_type: ImportType::Require,
-                id: dep_id.clone(),
-                filepath: dep_filepath,
             });
-
-            CallExpr {
-                span: DUMMY_SP,
-                callee,
-                args: vec![ExprOrSpread {
-                    expr: Box::from(Expr::Lit(Lit::Str(Str {
-                        value: dep_id.into(),
-                        span: DUMMY_SP,
-                        has_escape: true,
-                        kind: StrKind::Synthesized,
-                    }))),
-                    spread: None,
-                }],
-                ..node
-            }
-        } else {
-            node
         }
+
+        node
     }
 }
 
-impl<'a> RuntimeImportMapper<'a> {
+impl RuntimeImportMapper {
     fn create_runtime_require(&self, dependency: &Dependency) -> ModuleItem {
+        let mut is_default_import = false;
         let decl_name = match &dependency.import_type {
             ImportType::Namespace(local) => Pat::Ident(BindingIdent::from(Ident {
                 sym: local.into(),
@@ -253,6 +238,27 @@ impl<'a> RuntimeImportMapper<'a> {
                     })
                     .collect(),
             }),
+            ImportType::Default(local) => {
+                is_default_import = true;
+
+                Pat::Object(ObjectPat {
+                    span: DUMMY_SP,
+                    optional: false,
+                    type_ann: None,
+                    props: vec![ObjectPatProp::KeyValue(KeyValuePatProp {
+                        key: PropName::Ident(Ident {
+                            span: DUMMY_SP,
+                            optional: false,
+                            sym: "default".into(),
+                        }),
+                        value: Box::from(Pat::Ident(BindingIdent::from(Ident {
+                            sym: local.clone(),
+                            span: DUMMY_SP,
+                            optional: false,
+                        }))),
+                    })],
+                })
+            }
             ImportType::SideEffect => {
                 panic!("NOT IMPLEMENTED: Side effect imports");
             }
@@ -268,19 +274,28 @@ impl<'a> RuntimeImportMapper<'a> {
                 name: decl_name,
                 init: Some(Box::new(Expr::Call(CallExpr {
                     callee: ExprOrSuper::Expr(Box::from(Expr::Ident(Ident {
-                        sym: "__runtime_require__".into(),
+                        sym: "require".into(),
                         span: DUMMY_SP,
                         optional: false,
                     }))),
-                    args: vec![ExprOrSpread {
-                        expr: Box::from(Expr::Lit(Lit::Str(Str {
-                            value: dependency.id.clone().into(),
-                            span: DUMMY_SP,
-                            has_escape: true,
-                            kind: StrKind::Synthesized,
-                        }))),
-                        spread: None,
-                    }],
+                    args: vec![
+                        ExprOrSpread {
+                            expr: Box::from(Expr::Lit(Lit::Str(Str {
+                                value: dependency.request.clone().into(),
+                                span: DUMMY_SP,
+                                has_escape: true,
+                                kind: StrKind::Synthesized,
+                            }))),
+                            spread: None,
+                        },
+                        ExprOrSpread {
+                            expr: Box::from(Expr::Lit(Lit::Bool(Bool {
+                                span: DUMMY_SP,
+                                value: is_default_import,
+                            }))),
+                            spread: None,
+                        },
+                    ],
                     span: DUMMY_SP,
                     type_args: None,
                 }))),

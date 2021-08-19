@@ -10,38 +10,40 @@ pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
   for module_id in modules_in_chunk {
     let module = c.graph.modules.get(module_id).expect("Missing module id");
 
-    module_map.push_str(&format!(
-      "\"{}\": function(exports, __runtime_require__) {{",
-      module.id
-    ));
-
-    if let ModuleType::CommonJS = module.module_type {
-      module_map.push_str("var module = {exports};");
+    match module.module_type {
+      ModuleType::CommonJS => {
+        module_map.push_str(&format!("\"{}\": [function(module, require) {{", module.id));
+        module_map.push_str(&module.code);
+        module_map.push_str("},'CJS'],")
+      }
+      ModuleType::ESM => {
+        module_map.push_str(&format!(
+          "\"{}\": [function(exports, require) {{",
+          module.id
+        ));
+        module_map.push_str(&module.code);
+        module_map.push_str("},'ESM'],")
+      }
     }
-
-    module_map.push_str(&module.code);
-
-    module_map.push_str("},")
   }
 
-  module_map.push_str("}");
+  module_map.push_str("\n}");
 
   format!(
     "
-    const modules = {};
-    const entry = \"{}\";
+    var modules = {};
+    var entry = \"{}\";
     function ductTape({{ modules, entry }}) {{
-      const moduleCache = {{}};
-      const require = moduleName => {{
-        if (moduleCache[moduleName]) {{
-          return moduleCache[moduleName];
+      var moduleCache = {{}};
+      var interopRequireDefault = (exports, isDefaultImport, isCjs) => isDefaultImport && isCjs ? {{ default: exports }} : exports;
+      var require = (moduleName, isDefaultImport) => {{
+        if (!moduleCache[moduleName]) {{
+          var exports = {{}};
+          modules[moduleName][0](exports, require);
+          moduleCache[moduleName] = modules[moduleName][1] === 'CJS' ? exports.exports : exports;
         }}
-        const exports = {{}};
 
-        moduleCache[moduleName] = exports;
-
-        modules[moduleName](exports, require);
-        return moduleCache[moduleName];
+        return interopRequireDefault(moduleCache[moduleName], isDefaultImport, modules[moduleName][1] === 'CJS');
       }};
     
       // start the program

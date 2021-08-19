@@ -29,6 +29,10 @@ impl ModuleGraph {
         self.modules.contains_key(id)
     }
 
+    pub fn get_module(&mut self, module_id: &str) -> Option<&mut JsModule> {
+        self.modules.get_mut(module_id)
+    }
+
     pub fn add_dependency(&mut self, id: &str, dep_id: &str) {
         match self.dependency_map.get_mut(id) {
             Some(deps) => {

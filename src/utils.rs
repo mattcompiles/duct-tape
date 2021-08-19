@@ -1,5 +1,4 @@
-use node_resolve::resolve_from;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn create_module_id(path: &Path, project_root: &Path) -> String {
     String::from(
@@ -8,9 +7,4 @@ pub fn create_module_id(path: &Path, project_root: &Path) -> String {
             .to_str()
             .expect("Failed to strip CWD"),
     )
-}
-
-pub fn resolve_dependency(request: &str, from: &Path) -> PathBuf {
-    resolve_from(request, PathBuf::from(&from.parent().unwrap()))
-        .expect(&format!("Failed to resolve {} from {:?}", request, &from))
 }

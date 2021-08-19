@@ -21,6 +21,7 @@ pub struct NamedImport {
 
 #[derive(Clone)]
 pub enum ImportType {
+    Default(JsWord),
     Namespace(JsWord),
     Named(Vec<NamedImport>),
     SideEffect,
@@ -29,7 +30,13 @@ pub enum ImportType {
 
 #[derive(Clone)]
 pub struct Dependency {
-    pub id: String,
-    pub filepath: PathBuf,
+    pub request: JsWord,
     pub import_type: ImportType,
+}
+
+impl JsModule {
+    pub fn update_dep_src(&mut self, request: &str, dep_id: &str) {
+        // TODO: Hardcoded to max 5 replaces, should be equal to the amount of required replaces
+        self.code = self.code.replacen(&request, &dep_id, 5);
+    }
 }

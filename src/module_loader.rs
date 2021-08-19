@@ -1,16 +1,19 @@
 use crate::compiler::Compilation;
 use crate::diagnostics::{Diagnostic, ModuleBuildSuccess};
+use crate::js_module::ModuleType;
 use crate::js_module::{Dependency, JsModule};
 use crate::parser::parse;
 use crate::transforms::runtime_imports::runtime_imports;
 use crate::utils::create_module_id;
+use node_resolve::resolve_from;
+use std::time::Duration;
+use swc_atoms::JsWord;
 
 use ast::*;
 use crossbeam_channel::unbounded;
 use rayon::ThreadPoolBuilder;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use swc_common::comments::SingleThreadedComments;
@@ -19,13 +22,36 @@ use swc_common::SourceMap;
 use swc_ecmascript::ast;
 use swc_ecmascript::codegen::text_writer::JsWriter;
 
-enum WorkMsg<T> {
-    Work(T),
+struct BuildModuleSuccess {
+    filepath: PathBuf,
+    code: String,
+    module_type: ModuleType,
+    dependencies: Vec<Dependency>,
+    duration: Duration,
+}
+
+struct ResolveModule {
+    source_filepath: PathBuf,
+    request: JsWord,
+    parent_module_id: String,
+}
+
+struct ResolveModuleSuccess {
+    filepath: PathBuf,
+    dep_id: String,
+    parent_module_id: String,
+    request: JsWord,
+}
+
+enum WorkMsg {
+    ResolveModule(ResolveModule),
+    BuildModule(PathBuf),
     Exit,
 }
 
-enum ResultMsg<T> {
-    Result(T),
+enum ResultMsg {
+    BuildModule(BuildModuleSuccess),
+    ResolveModule(ResolveModuleSuccess),
     Exited,
 }
 
@@ -35,23 +61,37 @@ pub fn load_entrypoint(c: &mut Compilation) {
     let pool = ThreadPoolBuilder::new()
         .build()
         .expect("Failed to create ThreadPool");
-    let project_root = Arc::new(c.config.project_root.clone());
+    let project_root = c.config.project_root.clone();
 
     thread::spawn(move || loop {
         match work_receiver.recv() {
-            Ok(WorkMsg::Work(filepath)) => {
+            Ok(WorkMsg::BuildModule(filepath)) => {
                 let result_sender = result_sender.clone();
-                let project_root = Arc::clone(&project_root);
 
                 pool.install(move || {
-                    let start = Instant::now();
-
-                    let (module, dependencies) =
-                        build_module(filepath, project_root).expect("Failed to build module");
+                    let result = build_module(filepath).expect("Failed to build module");
 
                     result_sender
-                        .send(ResultMsg::Result((module, dependencies, start.elapsed())))
-                        .unwrap();
+                        .send(ResultMsg::BuildModule(result))
+                        .expect("Failed to send BuildModule result from thread");
+                });
+            }
+            Ok(WorkMsg::ResolveModule(work)) => {
+                let result_sender = result_sender.clone();
+                let project_root = project_root.clone();
+
+                pool.install(move || {
+                    let resolved_filepath = resolve_module(work.source_filepath, &work.request[..]);
+                    let dep_id = create_module_id(&resolved_filepath, &project_root);
+
+                    result_sender
+                        .send(ResultMsg::ResolveModule(ResolveModuleSuccess {
+                            filepath: resolved_filepath,
+                            dep_id,
+                            parent_module_id: work.parent_module_id,
+                            request: work.request,
+                        }))
+                        .expect("Failed to send ResolveModule result from thread");
                 });
             }
             Ok(WorkMsg::Exit) => {
@@ -62,37 +102,64 @@ pub fn load_entrypoint(c: &mut Compilation) {
         }
     });
 
+    // Trigger initial build by add entrypoint to work queue
     work_sender
-        .send(WorkMsg::Work(c.config.entrypoint.clone()))
+        .send(WorkMsg::BuildModule(c.config.entrypoint.clone()))
         .unwrap();
 
-    let mut module_build_count = 1;
+    let mut active_work_count = 1;
 
     loop {
         match result_receiver.recv() {
-            Ok(ResultMsg::Result((module, dependencies, duration))) => {
+            Ok(ResultMsg::BuildModule(result)) => {
+                let module_id = create_module_id(&result.filepath, &c.config.project_root.clone());
                 c.diagnostics
                     .add_diagnostic(Diagnostic::ModuleBuildSuccess(ModuleBuildSuccess {
-                        module_id: module.id.clone(),
-                        duration,
+                        module_id: module_id.clone(),
+                        duration: result.duration,
                     }));
-                module_build_count -= 1;
-                for dep in dependencies {
-                    if !c.graph.has_module(&module.id) {
-                        module_build_count += 1;
-                        work_sender
-                            .send(WorkMsg::Work(dep.filepath.clone()))
-                            .unwrap();
-                    }
-                    c.graph.add_dependency(&module.id, &dep.id);
+
+                active_work_count -= 1;
+
+                for dep in result.dependencies {
+                    active_work_count += 1;
+                    work_sender
+                        .send(WorkMsg::ResolveModule(ResolveModule {
+                            request: dep.request.clone(),
+                            parent_module_id: module_id.clone(),
+                            source_filepath: result.filepath.clone(),
+                        }))
+                        .expect("Failed to send ResolveModule reqest");
                 }
-                println!(
-                    "{} built, deps in queue: {}",
-                    &module.id, module_build_count
-                );
-                c.graph.add_module(module);
-                if module_build_count == 0 {
+
+                println!("{} built, deps in queue: {}", &module_id, active_work_count);
+                c.graph.add_module(JsModule {
+                    id: module_id,
+                    filepath: result.filepath,
+                    code: result.code,
+                    module_type: result.module_type,
+                });
+
+                if active_work_count == 0 {
                     work_sender.send(WorkMsg::Exit).unwrap();
+                }
+            }
+            Ok(ResultMsg::ResolveModule(result)) => {
+                let graph = &mut c.graph;
+
+                graph
+                    .get_module(&result.parent_module_id)
+                    .expect("Failed to get requesting module")
+                    .update_dep_src(&result.request, &result.dep_id);
+
+                graph.add_dependency(&result.parent_module_id, &result.dep_id);
+
+                if !graph.has_module(&result.dep_id) {
+                    work_sender
+                        .send(WorkMsg::BuildModule(result.filepath))
+                        .expect("Failed to send BuildModule request");
+                } else {
+                    active_work_count -= 1;
                 }
             }
             Ok(ResultMsg::Exited) => {
@@ -103,12 +170,8 @@ pub fn load_entrypoint(c: &mut Compilation) {
     }
 }
 
-fn build_module(
-    filepath: PathBuf,
-    project_root: Arc<PathBuf>,
-) -> Result<(JsModule, Vec<Dependency>), String> {
-    println!("Building {}", filepath.to_str().unwrap());
-    let id = create_module_id(&filepath, &project_root);
+fn build_module(filepath: PathBuf) -> Result<BuildModuleSuccess, String> {
+    let start = Instant::now();
     let source_map = Lrc::new(SourceMap::default());
     let src_code = fs::read_to_string(&filepath).unwrap();
     let (module, comments) = match parse(&src_code, &filepath.to_str().unwrap(), &source_map) {
@@ -116,10 +179,15 @@ fn build_module(
         Ok(module) => module,
     };
 
-    let (final_ast, dependencies, module_type) = runtime_imports(module, &filepath, &project_root);
+    let (final_ast, dependencies, module_type) = runtime_imports(module);
 
     let buf = match emit(&final_ast, source_map, comments) {
-        Err(_) => return Err(format!("Failed to emit buffer: {}", &id)),
+        Err(_) => {
+            return Err(format!(
+                "Failed to emit buffer: {}",
+                &filepath.to_str().unwrap()
+            ))
+        }
         Ok(value) => value,
     };
 
@@ -127,21 +195,19 @@ fn build_module(
         Err(_) => {
             return Err(format!(
                 "Failed to convert UTF-8 buffer to string buffer: {}",
-                &id,
+                &filepath.to_str().unwrap(),
             ))
         }
         Ok(value) => value,
     };
 
-    Ok((
-        JsModule {
-            id,
-            filepath,
-            code,
-            module_type,
-        },
+    Ok(BuildModuleSuccess {
+        filepath,
+        code,
+        module_type,
         dependencies,
-    ))
+        duration: start.elapsed(),
+    })
 }
 
 fn emit(
@@ -162,4 +228,11 @@ fn emit(
         emitter.emit_module(ast)?;
     }
     return Ok(buf);
+}
+
+fn resolve_module(source_filepath: PathBuf, request: &str) -> PathBuf {
+    resolve_from(request, PathBuf::from(&source_filepath.parent().unwrap())).expect(&format!(
+        "Failed to resolve {} from {:?}",
+        request, &source_filepath
+    ))
 }
