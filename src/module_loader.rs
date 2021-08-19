@@ -16,11 +16,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Instant;
+use swc_common::chain;
 use swc_common::comments::SingleThreadedComments;
 use swc_common::sync::Lrc;
 use swc_common::SourceMap;
 use swc_ecmascript::ast;
 use swc_ecmascript::codegen::text_writer::JsWriter;
+use swc_ecmascript::transforms::{react, typescript};
+use swc_ecmascript::visit::FoldWith;
 
 struct BuildModuleSuccess {
     filepath: PathBuf,
@@ -178,7 +181,17 @@ fn build_module(filepath: PathBuf) -> Result<BuildModuleSuccess, String> {
         Ok(module) => module,
     };
 
-    let (final_ast, dependencies, module_type) = runtime_imports(module);
+    let (module, dependencies, module_type) = runtime_imports(module);
+
+    let final_ast = {
+        let react_transform = react::react(
+            source_map.clone(),
+            Some(&comments),
+            react::Options::default(),
+        );
+        let mut passes = chain!(typescript::strip(), react_transform);
+        module.fold_with(&mut passes)
+    };
 
     let buf = match emit(&final_ast, source_map, comments) {
         Err(_) => {
