@@ -5,7 +5,7 @@ use crate::parser::parse;
 use crate::transforms::runtime_imports::runtime_imports;
 use crate::utils::create_module_id;
 use crate::Compilation;
-use node_resolve::resolve_from;
+use node_resolve::Resolver;
 use std::time::Duration;
 use swc_atoms::JsWord;
 
@@ -243,8 +243,12 @@ fn emit(
 }
 
 fn resolve_module(source_filepath: PathBuf, request: &str) -> PathBuf {
-    resolve_from(request, PathBuf::from(&source_filepath.parent().unwrap())).expect(&format!(
-        "Failed to resolve {} from {:?}",
-        request, &source_filepath
-    ))
+    Resolver::new()
+        .with_extensions(vec!["ts", "js", "mjs", "json"])
+        .with_basedir(PathBuf::from(&source_filepath.parent().unwrap()))
+        .resolve(request)
+        .expect(&format!(
+            "Failed to resolve {} from {:?}",
+            request, &source_filepath
+        ))
 }
