@@ -1,5 +1,5 @@
-use crate::compiler::Compilation;
 use crate::js_module::ModuleType;
+use crate::Compilation;
 
 pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
   let mut modules_in_chunk = c.graph.get_module_deps(&entry_id);

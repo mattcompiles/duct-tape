@@ -1,10 +1,10 @@
-use crate::compiler::Compilation;
 use crate::diagnostics::{Diagnostic, ModuleBuildSuccess};
 use crate::js_module::ModuleType;
 use crate::js_module::{Dependency, JsModule};
 use crate::parser::parse;
 use crate::transforms::runtime_imports::runtime_imports;
 use crate::utils::create_module_id;
+use crate::Compilation;
 use node_resolve::resolve_from;
 use std::time::Duration;
 use swc_atoms::JsWord;
@@ -132,7 +132,6 @@ pub fn load_entrypoint(c: &mut Compilation) {
                         .expect("Failed to send ResolveModule reqest");
                 }
 
-                println!("{} built, deps in queue: {}", &module_id, active_work_count);
                 c.graph.add_module(JsModule {
                     id: module_id,
                     filepath: result.filepath,
