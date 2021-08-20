@@ -31,6 +31,19 @@ pub fn render_chunk(entry_id: &String, c: &Compilation) -> String {
 
   format!(
     "
+    function __exportAll__(target) {{
+      Object.keys(target).forEach(function (key) {{
+        if (key === 'default') return;
+        if (Object.prototype.hasOwnProperty.call(_exportNames, key)) return;
+        if (key in exports && exports[key] === target[key]) return;
+        Object.defineProperty(exports, key, {{
+          enumerable: true,
+          get: function get() {{
+            return target[key];
+          }}
+        }});
+      }});
+    }}
     var modules = {};
     var entry = \"{}\";
     function ductTape({{ modules, entry }}) {{

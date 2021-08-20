@@ -6,6 +6,7 @@ use crate::transforms::runtime_imports::runtime_imports;
 use crate::utils::create_module_id;
 use crate::Compilation;
 use node_resolve::Resolver;
+use std::collections::HashSet;
 use std::time::Duration;
 use swc_atoms::JsWord;
 
@@ -111,6 +112,7 @@ pub fn load_entrypoint(c: &mut Compilation) {
         .unwrap();
 
     let mut active_work_count = 1;
+    let mut found_modules: HashSet<String> = HashSet::new();
 
     loop {
         match result_receiver.recv() {
@@ -156,7 +158,8 @@ pub fn load_entrypoint(c: &mut Compilation) {
 
                 graph.add_dependency(&result.parent_module_id, &result.dep_id);
 
-                if !graph.has_module(&result.dep_id) {
+                if !found_modules.contains(&result.dep_id) {
+                    found_modules.insert(result.dep_id.clone());
                     work_sender
                         .send(WorkMsg::BuildModule(result.filepath))
                         .expect("Failed to send BuildModule request");
@@ -175,7 +178,11 @@ pub fn load_entrypoint(c: &mut Compilation) {
 fn build_module(filepath: PathBuf) -> Result<BuildModuleSuccess, String> {
     let start = Instant::now();
     let source_map = Lrc::new(SourceMap::default());
-    let src_code = fs::read_to_string(&filepath).unwrap();
+
+    let src_code = fs::read_to_string(&filepath).expect(&format!(
+        "Failed to read file: {}",
+        &filepath.to_str().unwrap()
+    ));
     let (module, comments) = match parse(&src_code, &filepath.to_str().unwrap(), &source_map) {
         Err(_) => return Err(String::from("Error parsing module")),
         Ok(module) => module,

@@ -42,17 +42,79 @@ impl Fold for RuntimeImportMapper {
         });
 
         for i in 0..node.body.len() {
+            let mut exports = Vec::new();
+
             match &node.body[i] {
                 ModuleItem::ModuleDecl(decl) => {
                     // Detecting a ModuleDecl means the current file is ESM
                     self.module_type = ModuleType::ESM;
                     match decl {
-                        ModuleDecl::ExportNamed(_named_export) => {
-                            panic!("ModuleDecl::ExportNamed: Not implemented");
+                        ModuleDecl::ExportNamed(export) => {
+                            for specifier in &export.specifiers {
+                                match specifier {
+                                    ExportSpecifier::Namespace(namespace) => {
+                                        if let Some(src) = &export.src {
+                                            self.dependencies.push(Dependency {
+                                                request: src.value.clone(),
+                                                import_type: ImportType::Namespace(
+                                                    namespace.name.sym.clone(),
+                                                ),
+                                            })
+                                        } else {
+                                            panic!("Invalid syntax: Namespace export must have src")
+                                        }
+
+                                        exports.push(create_runtime_export(
+                                            &namespace.name.sym,
+                                            &Box::new(Expr::Ident(namespace.name.clone())),
+                                        ));
+                                    }
+                                    ExportSpecifier::Default(default_export) => {
+                                        if let Some(src) = &export.src {
+                                            self.dependencies.push(Dependency {
+                                                request: src.value.clone(),
+                                                import_type: ImportType::Default(
+                                                    default_export.exported.sym.clone(),
+                                                ),
+                                            })
+                                        }
+
+                                        exports.push(create_runtime_export(
+                                            &default_export.exported.sym,
+                                            &Box::new(Expr::Ident(default_export.exported.clone())),
+                                        ));
+                                    }
+                                    ExportSpecifier::Named(named_export) => {
+                                        if let Some(src) = &export.src {
+                                            self.dependencies.push(Dependency {
+                                                request: src.value.clone(),
+                                                // TODO: Group all named imports/exports from the same module into the same Dependency
+                                                import_type: ImportType::Named(vec![NamedImport {
+                                                    local: named_export.orig.sym.clone(),
+                                                    import_name: named_export.orig.sym.clone(),
+                                                }]),
+                                            })
+                                        }
+
+                                        let export_ident;
+
+                                        if let Some(exported) = &named_export.exported {
+                                            export_ident = exported;
+                                        } else {
+                                            export_ident = &named_export.orig;
+                                        }
+
+                                        exports.push(create_runtime_export(
+                                            &export_ident.sym,
+                                            &Box::new(Expr::Ident(named_export.orig.clone())),
+                                        ));
+                                    }
+                                }
+                            }
                         }
                         ModuleDecl::ExportDecl(named_export) => match &named_export.decl {
                             Decl::Var(var_decl) => {
-                                node.body[i] = create_runtime_export(
+                                exports.push(create_runtime_export(
                                     match &var_decl.decls[0].name {
                                         Pat::Ident(ident) => &ident.id.sym,
                                         _ => panic!("Not implemented"),
@@ -61,19 +123,54 @@ impl Fold for RuntimeImportMapper {
                                         .init
                                         .as_ref()
                                         .expect("export const with no initialiser"),
-                                );
+                                ));
                             }
                             _ => {}
                         },
                         ModuleDecl::ExportDefaultExpr(default_export) => {
                             let export_name: JsWord = "default".into();
-                            node.body[i] =
-                                create_runtime_export(&export_name, &default_export.expr);
+                            exports.push(create_runtime_export(&export_name, &default_export.expr));
+                        }
+                        ModuleDecl::ExportAll(export_all) => {
+                            let export_local = format!("namespace_{}", export_all.src.value);
+
+                            self.dependencies.push(Dependency {
+                                request: export_all.src.value.clone(),
+                                import_type: ImportType::Namespace(export_local.clone().into()),
+                            });
+
+                            exports.push(Box::new(Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                type_args: None,
+                                callee: ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
+                                    span: DUMMY_SP,
+                                    optional: false,
+                                    sym: "__exportAll__".into(),
+                                }))),
+                                args: vec![ExprOrSpread {
+                                    spread: None,
+                                    expr: Box::new(Expr::Ident(Ident {
+                                        span: DUMMY_SP,
+                                        optional: false,
+                                        sym: export_local.into(),
+                                    })),
+                                }],
+                            })));
                         }
                         _ => {}
                     }
                 }
                 _ => {}
+            };
+
+            if exports.len() > 0 {
+                node.body[i] = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+                    span: DUMMY_SP,
+                    expr: Box::new(Expr::Seq(SeqExpr {
+                        span: DUMMY_SP,
+                        exprs: exports,
+                    })),
+                }))
             }
         }
 
@@ -306,30 +403,27 @@ impl RuntimeImportMapper {
     }
 }
 
-fn create_runtime_export(name: &JsWord, value: &Box<Expr>) -> ModuleItem {
-    ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+fn create_runtime_export(name: &JsWord, value: &Box<Expr>) -> Box<Expr> {
+    Box::new(Expr::Assign(AssignExpr {
         span: DUMMY_SP,
-        expr: Box::new(Expr::Assign(AssignExpr {
+
+        op: AssignOp::Assign,
+
+        left: PatOrExpr::Expr(Box::new(Expr::Member(MemberExpr {
             span: DUMMY_SP,
-
-            op: AssignOp::Assign,
-
-            left: PatOrExpr::Expr(Box::new(Expr::Member(MemberExpr {
+            obj: ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
                 span: DUMMY_SP,
-                obj: ExprOrSuper::Expr(Box::new(Expr::Ident(Ident {
-                    span: DUMMY_SP,
-                    sym: "exports".into(),
-                    optional: false,
-                }))),
-                prop: Box::new(Expr::Ident(Ident {
-                    span: DUMMY_SP,
-                    sym: name.into(),
-                    optional: false,
-                })),
-                computed: false,
+                sym: "exports".into(),
+                optional: false,
             }))),
+            prop: Box::new(Expr::Ident(Ident {
+                span: DUMMY_SP,
+                sym: name.into(),
+                optional: false,
+            })),
+            computed: false,
+        }))),
 
-            right: value.clone(),
-        })),
+        right: value.clone(),
     }))
 }
