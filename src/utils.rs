@@ -8,3 +8,15 @@ pub fn create_module_id(path: &Path, project_root: &Path) -> String {
             .expect("Failed to strip CWD"),
     )
 }
+
+pub fn strip_invalid_chars(value: &str) -> String {
+    value
+        .chars()
+        .map(|x| match x {
+            '/' => '_',
+            '.' => '_',
+            '-' => '_',
+            _ => x,
+        })
+        .collect()
+}

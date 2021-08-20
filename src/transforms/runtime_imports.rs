@@ -1,3 +1,4 @@
+use crate::utils::strip_invalid_chars;
 use ast::*;
 use swc_atoms::JsWord;
 use swc_common::DUMMY_SP;
@@ -132,7 +133,8 @@ impl Fold for RuntimeImportMapper {
                             exports.push(create_runtime_export(&export_name, &default_export.expr));
                         }
                         ModuleDecl::ExportAll(export_all) => {
-                            let export_local = format!("namespace_{}", export_all.src.value);
+                            let export_local =
+                                format!("namespace_{}", strip_invalid_chars(&export_all.src.value));
 
                             self.dependencies.push(Dependency {
                                 request: export_all.src.value.clone(),
