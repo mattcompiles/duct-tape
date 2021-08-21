@@ -126,6 +126,15 @@ impl Fold for RuntimeImportMapper {
                                         .expect("export const with no initialiser"),
                                 ));
                             }
+                            Decl::Fn(fn_decl) => {
+                                exports.push(create_runtime_export(
+                                    &fn_decl.ident.sym,
+                                    &Box::new(Expr::Fn(FnExpr {
+                                        ident: Some(fn_decl.ident.clone()),
+                                        function: fn_decl.function.clone(),
+                                    })),
+                                ));
+                            }
                             _ => {}
                         },
                         ModuleDecl::ExportDefaultExpr(default_export) => {

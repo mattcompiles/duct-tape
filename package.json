@@ -1,0 +1,10 @@
+{
+  "name": "duct-tape",
+  "private": true,
+  "repository": "git@github.com:mattcompiles/duct_tape.git",
+  "author": "Matt Jones <mattjones701@gmail.com>",
+  "license": "MIT",
+  "workspaces": [
+    "fixtures/*"
+  ]
+}

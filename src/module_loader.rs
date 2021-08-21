@@ -251,7 +251,7 @@ fn emit(
 
 fn resolve_module(source_filepath: PathBuf, request: &str) -> PathBuf {
     Resolver::new()
-        .with_extensions(vec!["ts", "js", "mjs", "json"])
+        .with_extensions(vec!["ts", "tsx", "js", "mjs", "json"])
         .with_basedir(PathBuf::from(&source_filepath.parent().unwrap()))
         .resolve(request)
         .expect(&format!(

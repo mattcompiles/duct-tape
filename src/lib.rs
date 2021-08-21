@@ -18,6 +18,7 @@ use std::time::Instant;
 pub struct Config {
     pub project_root: PathBuf,
     pub entrypoint: PathBuf,
+    pub output_dir: PathBuf,
 }
 
 pub struct Compilation {
@@ -27,6 +28,12 @@ pub struct Compilation {
 }
 
 pub fn compile(config: Config) {
+    println!(
+        "Entrypoint: '{}'\nOutput dir: '{}'\nProject root: '{}'",
+        config.entrypoint.to_str().unwrap(),
+        config.output_dir.to_str().unwrap(),
+        config.project_root.to_str().unwrap()
+    );
     let start_time = Instant::now();
     let mut c = Compilation {
         diagnostics: Diagnostics::new(),
@@ -42,7 +49,7 @@ pub fn compile(config: Config) {
     module_loader::load_entrypoint(&mut c);
 
     let chunk = template::render_chunk(&c.graph.entrypoints[0], &c);
-    let output_filepath = c.config.project_root.join("output.js");
+    let output_filepath = c.config.output_dir.join("main.js");
     emit_file(&output_filepath.to_str().unwrap(), &chunk).expect("Failed to write chunk");
     let elapsed_time = start_time.elapsed();
     c.diagnostics.print();
